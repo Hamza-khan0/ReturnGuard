@@ -1,29 +1,85 @@
+import requests
 import pandas as pd
-import numpy as np
 
-def load_data(n_customers: int = 1000) -> pd.DataFrame:
+from ml.schema import (
+    WORLD_BANK_INDICATORS,
+    ENTITY_COLUMN,
+    TIME_COLUMN
+)
+
+BASE_URL = "https://api.worldbank.org/v2/country"
+
+
+def fetch_indicator(country: str, indicator_code: str, indicator_name: str) -> pd.DataFrame:
     """
-    Generate synthetic customer transaction data.
-    This simulates real business data for ML training.
+    Fetch time-series data for a single World Bank indicator
     """
+    url = f"{BASE_URL}/{country}/indicator/{indicator_code}"
+    params = {
+        "format": "json",
+        "per_page": 1000
+    }
 
-    np.random.seed(42)
+    response = requests.get(url, params=params)
+    response.raise_for_status()
+    data = response.json()
 
-    data = pd.DataFrame({
-        "customer_id": range(n_customers),
-        "visits": np.random.poisson(lam=5, size=n_customers),
-        "avg_gap_days": np.random.uniform(1, 30, size=n_customers),
-        "days_since_last_visit": np.random.uniform(1, 60, size=n_customers),
-        "total_spend": np.random.uniform(50, 5000, size=n_customers),
-    })
+    if not data or len(data) < 2:
+        return pd.DataFrame()
 
-    # Regression target: days until next return
-    data["days_until_return"] = (
-        data["avg_gap_days"] +
-        np.random.normal(0, 3, size=n_customers)
-    ).clip(1)
+    records = data[1]
 
-    # Classification target: churn (1 = churned)
-    data["churned"] = (data["days_since_last_visit"] > 30).astype(int)
+    rows = []
+    for r in records:
+        if r["value"] is not None:
+            rows.append({
+                ENTITY_COLUMN: country,
+                TIME_COLUMN: int(r["date"]),
+                indicator_name: float(r["value"])
+            })
 
-    return data
+    return pd.DataFrame(rows)
+
+
+def load_data(countries=None) -> pd.DataFrame:
+    """
+    Load and merge World Bank indicators into a single DataFrame
+    """
+    if countries is None:
+        countries = ["USA", "PAK", "IND", "GBR", "CHN"]
+
+    all_data = []
+
+    for country in countries:
+        country_df = None
+
+        for feature_name, indicator_code in WORLD_BANK_INDICATORS.items():
+            df = fetch_indicator(
+                country=country,
+                indicator_code=indicator_code,
+                indicator_name=feature_name
+            )
+
+            if df.empty:
+                continue
+
+            if country_df is None:
+                country_df = df
+            else:
+                country_df = country_df.merge(
+                    df,
+                    on=[ENTITY_COLUMN, TIME_COLUMN],
+                    how="inner"
+                )
+
+        if country_df is not None:
+            all_data.append(country_df)
+
+    final_df = pd.concat(all_data, ignore_index=True)
+
+    # Sort for time-series feature engineering
+    final_df = final_df.sort_values(
+        by=[ENTITY_COLUMN, TIME_COLUMN]
+    ).reset_index(drop=True)
+
+    return final_df
